@@ -38,6 +38,38 @@ class TestIsBackgroundReviewHarnessMessage:
         assert _is_background_review_harness_message(msg) is False
 
 
+class TestEveryReviewPromptIsRecognized:
+    """The harness strip keys on a hand-maintained list of prompt openings, so a prompt
+    the list does not name replays into the live session as a standing instruction —
+    exactly the pollution ``_persist_disabled`` + this strip exist to clean up. The
+    combined prompt (what an automatic both-scope review sends) was missing."""
+
+    def test_every_review_prompt_opening_is_recognized(self):
+        import agent.background_review as background_review
+
+        prompts = {
+            name: value
+            for name, value in vars(background_review).items()
+            if name.endswith("_REVIEW_PROMPT") and isinstance(value, str)
+        }
+        assert {"_MEMORY_REVIEW_PROMPT", "_SKILL_REVIEW_PROMPT", "_COMBINED_REVIEW_PROMPT"} <= set(prompts)
+        for name, prompt in prompts.items():
+            # The fork sends the chosen prompt plus its dispatch guidance as ONE user message.
+            content = prompt + "\n\nYou can only call memory and skill management tools."
+            assert _is_background_review_harness_message({"role": "user", "content": content}) is True, name
+
+    def test_strips_combined_harness_turn_and_reply(self):
+        from agent.background_review import _COMBINED_REVIEW_PROMPT
+
+        messages = [
+            {"role": "user", "content": "What's the weather?"},
+            {"role": "assistant", "content": "It's sunny."},
+            {"role": "user", "content": _COMBINED_REVIEW_PROMPT + "\n\nYou can only call memory and skill management tools."},
+            {"role": "assistant", "content": "Nothing to save."},
+            {"role": "user", "content": "Thanks, now book a flight."},
+        ]
+        out = _strip_background_review_harness(messages)
+        assert [m["content"] for m in out] == ["What's the weather?", "It's sunny.", "Thanks, now book a flight."]
 
 
 class TestStripBackgroundReviewHarness:

@@ -215,10 +215,15 @@ def _ensure_test_isolation(db_path: Path) -> None:
             )
 
 
-# Openings of the background-review harness prompts (agent/background_review.py).
+# Openings of the background-review harness prompts (agent/background_review.py), one per
+# scope: memory-only, skill-only, and the combined prompt an automatic both-scope review
+# sends. Kept as short openings rather than the full prompts so rows written by older
+# builds (which shared the parent session and persisted the harness turn) still match
+# after a prompt is reworded.
 _REVIEW_HARNESS_PREFIXES = (
     "Review the conversation above and update the skill library",
     "Review the conversation above and consider saving to memory",
+    "Review the conversation above and update two things:",
 )
 
 
