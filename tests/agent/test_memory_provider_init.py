@@ -1,7 +1,10 @@
 """Regression tests for memory provider selection during AIAgent init."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 
 class RecordingMemoryProvider:
@@ -201,3 +204,136 @@ def test_aiagent_reuses_handed_in_memory_manager_without_reinitializing():
     assert second._memory_manager is manager
     assert load_memory_provider.call_count == 1
     assert provider.init_session_id is None
+
+
+def _init_agent_with_provider(provider, session_id):
+    """Build a real AIAgent whose ``memory.provider`` resolves to *provider*.
+
+    Mirrors the harness above: config and the provider loader are patched, so the
+    provider object under test is the one ``_init_memory`` probes during init.
+    """
+    cfg = {"memory": {"provider": provider.name}, "agent": {}}
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg), patch("hermes_cli.config.load_config_readonly", return_value=cfg),
+        patch("plugins.memory.load_memory_provider", return_value=provider),
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        return AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=False,
+            session_id=session_id,
+        )
+
+
+class _ProbeProvider:
+    """Minimal provider shape — only what ``_init_memory`` touches during init."""
+
+    name = "probe-provider"
+
+    def is_available(self) -> bool:
+        return True
+
+    def initialize(self, session_id, **kwargs) -> None:
+        pass
+
+    def get_tool_schemas(self):
+        return []
+
+    def shutdown(self) -> None:
+        pass
+
+
+class _SystemExitProbeProvider(_ProbeProvider):
+    """Availability probe that dies the way an unguarded lazy-install takeover does.
+
+    ``tools.lazy_deps.install_specs`` -> ``stop_for_relaunch()`` raises ``SystemExit``
+    (see #122326); the memory-provider init path is one of its callers.
+    """
+
+    name = "sys-exit-probe-provider"
+
+    def is_available(self) -> bool:
+        raise SystemExit(1)
+
+
+class _SystemExitReasonProvider(_ProbeProvider):
+    """Unavailable provider whose ``unavailable_reason()`` raises ``SystemExit``."""
+
+    name = "sys-exit-reason-provider"
+
+    def is_available(self) -> bool:
+        return False
+
+    def unavailable_reason(self) -> str:
+        raise SystemExit(1)
+
+
+def test_systemexit_from_is_available_does_not_kill_agent_init(caplog):
+    """#123042: ``SystemExit`` is not an ``Exception`` — the guard must contain it.
+
+    Before the fix the raise escaped ``init_agent`` and killed the process (exit code 1
+    with no output in the CLI, a crash loop in the gateway). A failed provider is a
+    degraded feature; it must never end the process.
+    """
+    escaped = None
+    with caplog.at_level(logging.WARNING, logger="run_agent"):
+        try:
+            agent = _init_agent_with_provider(_SystemExitProbeProvider(), "sess-sysexit")
+        except SystemExit as exc:  # the defect: a probe's SystemExit leaves init_agent
+            escaped, agent = exc, None
+
+    assert escaped is None, (
+        f"SystemExit({escaped.code if escaped else ''}) escaped agent init — a memory "
+        "provider's availability probe must not be able to kill the process"
+    )
+    assert agent is not None
+    assert agent._memory_manager is None
+    failed = [r for r in caplog.records if "Memory provider plugin init failed" in r.getMessage()]
+    assert failed, [r.getMessage() for r in caplog.records]
+    # The contained exception is reported, not swallowed: SystemExit(1) renders as "1".
+    assert failed[0].getMessage().endswith(": 1")
+
+
+def test_systemexit_from_unavailable_reason_does_not_kill_agent_init(caplog):
+    """The nested probe is guarded too: ``suppress(Exception)`` misses ``SystemExit``."""
+    escaped = None
+    with caplog.at_level(logging.WARNING, logger="run_agent"):
+        try:
+            agent = _init_agent_with_provider(_SystemExitReasonProvider(), "sess-sysexit-reason")
+        except SystemExit as exc:
+            escaped, agent = exc, None
+
+    assert escaped is None, (
+        f"SystemExit({escaped.code if escaped else ''}) escaped agent init — "
+        "unavailable_reason() must not be able to kill the process either"
+    )
+    assert agent is not None
+    assert agent._memory_manager is None
+    unavailable = [r for r in caplog.records if "sys-exit-reason-provider" in r.getMessage()]
+    assert unavailable, [r.getMessage() for r in caplog.records]
+
+
+def test_keyboard_interrupt_from_is_available_still_propagates():
+    """A user's Ctrl-C must keep working — only ``SystemExit`` is added to the guard.
+
+    ``hermes_cli/plugins_loader.py`` states the contract for this class of guard:
+    "SystemExit too ... KeyboardInterrupt still propagates".
+    """
+
+    class _InterruptProvider(RecordingMemoryProvider):
+        name = "interrupt-provider"
+
+        def is_available(self):
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _init_agent_with_provider(_InterruptProvider(), "sess-interrupt")
+
