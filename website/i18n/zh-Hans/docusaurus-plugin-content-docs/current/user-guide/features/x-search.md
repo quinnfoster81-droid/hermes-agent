@@ -17,10 +17,10 @@ sidebar_position: 7
 
 | 凭据 | 来源 | 配置方式 |
 |------|------|---------|
-| **SuperGrok / X Premium+ OAuth**（推荐） | 在 `accounts.x.ai` 浏览器登录，自动刷新 | `hermes auth add xai-oauth` — 参见 [xAI Grok OAuth (SuperGrok / X Premium+)](../../guides/xai-grok-oauth.md) |
-| **`XAI_API_KEY`** | 付费 xAI API 密钥 | 在 `~/.hermes/.env` 中设置 |
+| **SuperGrok / X Premium+ OAuth** | 在 `accounts.x.ai` 浏览器登录，自动刷新 | `hermes auth add xai-oauth` — 参见 [xAI Grok OAuth (SuperGrok / X Premium+)](../../guides/xai-grok-oauth.md) |
+| **`XAI_API_KEY`**（首选） | 付费 xAI API 密钥 | 在 `~/.hermes/.env` 中设置 |
 
-两者使用相同的 endpoint 和相同的请求体，区别仅在于 bearer token。**当两者同时配置时，SuperGrok OAuth 优先**，x_search 将消耗你的订阅配额而非付费 API 用量。
+两者使用相同的 endpoint 和相同的请求体，区别仅在于 bearer token。**当两者同时配置时，显式配置的 `XAI_API_KEY` 优先**——订阅 OAuth bearer 可以授权 `/v1/responses`，但 x_search 在 OAuth 下会退化为无引用的 Grok 解释模式，只有 API 密钥才会返回真实帖子。这也意味着设置了 `XAI_API_KEY` 时 x_search 走付费 API 计费；移除 `XAI_API_KEY` 才会回退到订阅配额（并接受上述回答质量下降的问题）。
 
 工具的 `check_fn` 在每次重建模型工具列表时都会运行 xAI 凭据解析器。返回 `True` 表示 bearer token 可获取、非空，且（若已过期）已成功刷新。刷新失败的已撤销 token 会将该工具从 schema 中隐藏，模型将无法感知其存在。
 
@@ -38,7 +38,7 @@ hermes tools
 1. **xAI Grok OAuth (SuperGrok / Premium+)** — 若尚未登录，将打开浏览器跳转至 `accounts.x.ai`
 2. **xAI API key** — 提示输入 `XAI_API_KEY`
 
-任一选项均可满足门控条件。你可以使用已有的任意凭据，工具行为完全相同。若两者均已配置，调用时 OAuth 优先。
+任一选项均可满足门控条件；你可以使用已有的任意凭据。若两者均已配置，调用时以显式配置的 `XAI_API_KEY` 为准，OAuth 仅作为回退——上方“认证”一节说明了计费与回答质量上的差异。
 
 ## 配置
 
