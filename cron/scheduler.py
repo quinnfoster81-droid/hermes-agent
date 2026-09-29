@@ -1872,10 +1872,20 @@ def _open_cron_session_db(job: dict):
     return None
 
 
-def _raise_inactivity_timeout(agent, job_name: str, limit_s: float) -> None:
-    """Log the agent's last activity, hard-interrupt it and raise TimeoutError."""
-    _activity = {}
-    if hasattr(agent, "get_activity_summary"):
+def _raise_inactivity_timeout(
+    agent, job_name: str, limit_s: float, latched_activity: Optional[dict] = None,
+) -> None:
+    """Log the agent's last activity, hard-interrupt it and raise TimeoutError.
+
+    ``latched_activity`` is the activity sample the watchdog latched the limit on. The agent can
+    resume between that sample and this call (host suspend/resume, a provider that comes back, a
+    tool that unblocks), so re-reading ``get_activity_summary()`` here reports the resumed run
+    instead of the stall: "idle for 3s (limit 600s)" from a run whose ledger row spans 3668s
+    (#127775). Report the latched sample whenever the caller has one; fall back to a live read
+    only when it does not.
+    """
+    _activity = dict(latched_activity) if isinstance(latched_activity, dict) else {}
+    if not _activity and hasattr(agent, "get_activity_summary"):
         with contextlib.suppress(Exception):
             _activity = agent.get_activity_summary()
     _last_desc = _activity.get("last_activity_desc", "unknown")
@@ -1943,16 +1953,23 @@ def _run_agent_with_watchdog(
     if worker_state is not None:
         worker_state["future"] = _cron_future
     _inactivity_timeout = False
+    # Newest activity sample the watchdog has read. It latches the limit on the last sample it
+    # sees, so this is the state that tripped the limit, not whatever the agent is doing later.
+    _latched_activity: Optional[dict] = None
     _watch_stop = threading.Event()
 
     def _idle_seconds() -> float:
+        nonlocal _latched_activity
         if not hasattr(agent, "get_activity_summary"):
             return 0.0
         try:
             _act = agent.get_activity_summary()
-            return float(_act.get("seconds_since_activity", 0.0) or 0.0)
+            _secs = float(_act.get("seconds_since_activity", 0.0) or 0.0)
         except Exception:
             return 0.0
+        if isinstance(_act, dict):
+            _latched_activity = dict(_act)
+        return _secs
 
     def _watch_inactivity() -> None:
         nonlocal _inactivity_timeout
@@ -1994,7 +2011,7 @@ def _run_agent_with_watchdog(
         _cron_pool.shutdown(wait=False, cancel_futures=True)
 
     if _inactivity_timeout:
-        _raise_inactivity_timeout(agent, job_name, _cron_inactivity_limit)
+        _raise_inactivity_timeout(agent, job_name, _cron_inactivity_limit, _latched_activity)
 
     if not isinstance(result, dict):
         raise RuntimeError(
